@@ -18,7 +18,13 @@ setup(
     ],
     keywords='courator',
     packages=['courator'],
-    install_requires=[],
+    install_requires=[
+        'flask',
+        'flask-restplus',
+        'PyMySQL',
+        'flask-database',
+        'passlib'
+    ],
     entry_points={
         'console_scripts': [
             'courator=courator.__main__:main'
