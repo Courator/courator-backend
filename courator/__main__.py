@@ -8,6 +8,7 @@ from .schema import init_db
 def main():
     parser = ArgumentParser(description='An app to rate and suggest university courses')
     sp = parser.add_subparsers(dest='action')
+    sp.required = True
     sp.add_parser('init')
     sp.add_parser('delete')
     sp.add_parser('run-dev')
