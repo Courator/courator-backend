@@ -22,21 +22,21 @@ class SimpleResource(Resource):
     def post(self):
         data = request.json
         try:
-            values = [data.pop(key, None) if key in self.optional else data.pop(key)
-                      for key in self.columns]
+            values = tuple(
+                data.pop(key, None) if key in self.optional else data.pop(key)
+                for key in self.columns
+            )
         except KeyError as e:
             raise BadRequest('Missing required attribute: {}'.format(e))
 
         if data:
             raise BadRequest('Extra data in request: {}'.format(data))
-
-        str_values = tuple('NULL' if i is None else i for i in values)
         try:
             value_id = db.run('INSERT INTO {} ({}) VALUES ({})'.format(
                 self.table,
                 ', '.join(self.columns),
                 ', '.join(['%s'] * len(self.columns))
-            ), str_values)
+            ), values)
         except MySQLError as e:
             raise BadRequest(e.args[1])
         return dict(zip(self.columns, values), id=value_id)
@@ -61,7 +61,7 @@ class UniversityRes(Resource):
     def patch(self, short_name):
         data = request.json
         try:
-            update_attributes = [i for i in ('name', 'shortName', 'website') if data.get(i)]
+            update_attributes = [i for i in ('name', 'shortName', 'website') if data.get(i, '')]
             db.run(
                 'UPDATE University SET {} WHERE shortName = %s'.format(
                     ', '.join('{} = %s'.format(attr) for attr in update_attributes)
@@ -109,7 +109,7 @@ class Account(Resource):
     def post(self):
         data = request.json
         try:
-            name = data.pop('name')
+            name = data.pop('name', '')
             email = data.pop('email')
             password = data.pop('password')
         except KeyError as e:
