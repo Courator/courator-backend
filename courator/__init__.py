@@ -2,7 +2,7 @@ import os
 
 import pymysql
 from flask import Flask
-from flask_restplus import Api
+from flask_restx import Api
 from flask_database import Database
 
 app = Flask(__name__)

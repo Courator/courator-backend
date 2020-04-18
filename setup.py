@@ -20,7 +20,7 @@ setup(
     packages=['courator'],
     install_requires=[
         'flask',
-        'flask-restplus',
+        'flask-restx',
         'PyMySQL',
         'flask-database',
         'passlib'

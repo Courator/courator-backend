@@ -1,17 +1,32 @@
-from werkzeug.exceptions import BadRequest
 import re
-from base64 import b64decode
+from contextlib import contextmanager
 from datetime import datetime
-from functools import lru_cache
-from time import time
 
 from flask import request
-from flask_restplus import Resource
+from flask_restx import Resource
 from passlib.hash import pbkdf2_sha256
+from pymysql import IntegrityError
 from pymysql.err import MySQLError
-from werkzeug.exceptions import NotFound
+from werkzeug.exceptions import BadRequest, Conflict
 
 from courator import api, db
+
+
+@contextmanager
+def handle_sql_errors():
+    try:
+        yield
+    except IntegrityError as e:
+        message = e.args[1]
+        m = re.match(r"Duplicate entry '(?P<value>[^']+)' for key '(?P<key>[^']+)'", message)
+        if m:
+            raise Conflict('Conflict on column "{}"'.format(m.groupdict()['key']))
+        raise BadRequest(message)
+    except MySQLError as e:
+        raise BadRequest(e.args[1])
+
+
+db.error_wrapper = handle_sql_errors
 
 
 class SimpleResource(Resource):
@@ -31,14 +46,12 @@ class SimpleResource(Resource):
 
         if data:
             raise BadRequest('Extra data in request: {}'.format(data))
-        try:
+        with handle_sql_errors():
             value_id = db.run('INSERT INTO {} ({}) VALUES ({})'.format(
                 self.table,
                 ', '.join(self.columns),
                 ', '.join(['%s'] * len(self.columns))
             ), values)
-        except MySQLError as e:
-            raise BadRequest(e.args[1])
         return dict(zip(self.columns, values), id=value_id)
 
     def get(self):
@@ -69,8 +82,6 @@ class UniversityRes(Resource):
             )
         except KeyError as e:
             raise BadRequest('Missing attribute: {}'.format(e))
-        except MySQLError as e:
-            raise BadRequest('Malformed request: {}'.format(e.args[1]))
         return {'status': 'success'}
 
     def delete(self, short_name):
@@ -119,14 +130,10 @@ class Account(Resource):
             raise BadRequest('Extra json data: {}'.format(data))
 
         password_hash = pbkdf2_sha256.hash(password, rounds=1024)
-        print(len(password_hash))
-        try:
-            account_id = db.run(
-                'INSERT INTO Account (name, email, passwordHash, about) VALUES (%s, %s, %s, %s)',
-                (name, email, password_hash, 'NULL')
-            )
-        except MySQLError as e:
-            raise BadRequest(e.args[1])
+        account_id = db.run(
+            'INSERT INTO Account (name, email, passwordHash, about) VALUES (%s, %s, %s, %s)',
+            (name, email, password_hash, 'NULL')
+        )
         return {
             'id': account_id,
             'name': name,
@@ -140,11 +147,8 @@ class Account(Resource):
         except KeyError as e:
             raise BadRequest('Missing required json attribute: {}'.format(e))
         columns = ('id', 'name', 'name', 'email', 'about')
-        try:
-            data = db.fetch_one('SELECT {} FROM Account WHERE email = %s'.format(
-                ', '.join(columns)), email)
-        except MySQLError as e:
-            raise BadRequest(e.args[1])
+        data = db.fetch_one('SELECT {} FROM Account WHERE email = %s'.format(
+            ', '.join(columns)), email)
         return dict(zip(data, columns))
 
 
@@ -169,19 +173,17 @@ class CourseRating(Resource):
             if not set(rating) == {'attributeID', 'value'} or not (0.0 <= float(rating['value']) <= 1.0):
                 raise BadRequest('Malformed course rating: {}'.format(rating))
 
-        try:
-            with db as cursor:
-                cursor.execute(
-                    'INSERT INTO CourseRating (description, date, accountID, courseID) VALUES (%s, %s, %s, %s)',
-                    (description, cur_date, account_id, course_id)
-                )
-                rating_id = cursor.lastrowid
-                cursor.executemany('INSERT INTO CourseRatingValue (courseRatingID, courseRatingAttributeID, value) VALUES (%s, %s, %s)', [
+        with db as cursor:
+            cursor.execute(
+                'INSERT INTO CourseRating (description, date, accountID, courseID) VALUES (%s, %s, %s, %s)',
+                (description, cur_date, account_id, course_id)
+            )
+            rating_id = cursor.lastrowid
+            cursor.executemany(
+                'INSERT INTO CourseRatingValue (courseRatingID, courseRatingAttributeID, value) VALUES (%s, %s, %s)', [
                     (rating_id, rating['courseRatingAttributeID'],
-                    float(rating['value']))
+                     float(rating['value']))
                 ])
-        except MySQLError as e:
-            raise BadRequest(e.args[1])
         return {
             'description': description,
             'accountID': account_id,
