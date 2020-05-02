@@ -1,20 +1,19 @@
-import os
+from typing import Tuple
 
-import pymysql
-from flask import Flask
-from flask_restx import Api
-from flask_database import Database
+from databases import Database
+from fastapi import FastAPI
 
-app = Flask(__name__)
-db = Database(
-    app,
-    pymysql,
-    host='127.0.0.1',
-    port=3306,
-    user='courator',
-    password='courator123',
-    database='courator'
-)
-api = Api(app, ui=False)
+from courator.config import DATABASE_URL, DEBUG
 
-import courator.routes  # noqa
+app = FastAPI()
+db = Database(DATABASE_URL)
+
+
+def setup_globals():
+    app.on_event("startup")(db.connect)
+    app.on_event("shutdown")(db.disconnect)
+    from .routes import router
+    app.include_router(router)
+
+
+setup_globals()

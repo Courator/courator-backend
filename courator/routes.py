@@ -1,208 +1,275 @@
 import re
-from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
+from typing import Optional, List
 
-from flask import request
-from flask_restx import Resource
-from passlib.hash import pbkdf2_sha256
+import jwt
+from fastapi import APIRouter, HTTPException
+from fastapi import status
+from fastapi.params import Depends
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from jwt import PyJWTError
+from loguru import logger
+from passlib.context import CryptContext
 from pymysql import IntegrityError
-from pymysql.err import MySQLError
-from werkzeug.exceptions import BadRequest, Conflict
 
-from courator import api, db
+from courator import db
+from courator.config import TOKEN_EXPIRATION_DAYS, SECRET_KEY, TOKEN_ALGORITHM
+from courator.schemas import AccountIn, Account, University, UniversityIn, PERM_ADMIN, Course, CourseIn, CourseUpdateIn, \
+    Token
+
+router = APIRouter()
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/token")
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+credentials_exception = HTTPException(
+    status_code=status.HTTP_401_UNAUTHORIZED,
+    detail="Could not validate credentials",
+    headers={"WWW-Authenticate": "Bearer"},
+)
 
 
-@contextmanager
-def handle_sql_errors():
+async def auth_account(token: str = Depends(oauth2_scheme)) -> Account:
+    account_id = decode_account_token(token)
+    if not account_id:
+        raise credentials_exception
+    fields = Account.__fields__
+    query = 'SELECT {} FROM Account WHERE id = :id'.format(', '.join(fields))
+    account_data = await db.fetch_one(query, dict(id=account_id))
+    if not account_data:
+        raise credentials_exception
+    return Account(**dict(zip(fields, account_data)))
+
+
+async def auth_admin_account(token: str = Depends(oauth2_scheme)) -> Account:
+    account = await auth_account(token)
+    if not account.permissions & PERM_ADMIN:
+        raise credentials_exception
+    return account
+
+
+@router.post('/account', response_model=Account)
+async def account_create(account: AccountIn):
+    password_hash = pwd_context.hash(account.password)
+    account_data = dict(**account.dict(exclude={'password'}), passwordHash=password_hash)
     try:
-        yield
-    except IntegrityError as e:
-        message = e.args[1]
-        m = re.match(r"Duplicate entry '(?P<value>[^']+)' for key '(?P<key>[^']+)'", message)
-        if m:
-            raise Conflict('Conflict on column "{}"'.format(m.groupdict()['key']))
-        raise BadRequest(message)
-    except MySQLError as e:
-        raise BadRequest(e.args[1])
-
-
-db.error_wrapper = handle_sql_errors
-
-
-class SimpleResource(Resource):
-    columns = ()
-    optional = set()
-    table = ''
-
-    def post(self):
-        data = request.json
-        try:
-            values = tuple(
-                data.pop(key, None) if key in self.optional else data.pop(key)
-                for key in self.columns
-            )
-        except KeyError as e:
-            raise BadRequest('Missing required attribute: {}'.format(e))
-
-        if data:
-            raise BadRequest('Extra data in request: {}'.format(data))
-        with handle_sql_errors():
-            value_id = db.run('INSERT INTO {} ({}) VALUES ({})'.format(
-                self.table,
-                ', '.join(self.columns),
-                ', '.join(['%s'] * len(self.columns))
-            ), values)
-        return dict(zip(self.columns, values), id=value_id)
-
-    def get(self):
-        columns = ('id',) + self.columns
-        data = db.fetch_all('SELECT {} FROM {}'.format(
-            ', '.join(columns), self.table
-        ))
-        return [dict(zip(columns, row)) for row in data]
-
-
-@api.route('/university')
-class University(SimpleResource):
-    columns = ('name', 'shortName', 'website')
-    optional = {'website'}
-    table = 'University'
-
-
-@api.route('/university/<short_name>')
-class UniversityRes(Resource):
-    def patch(self, short_name):
-        data = request.json
-        try:
-            update_attributes = [i for i in ('name', 'shortName', 'website') if data.get(i, '')]
-            db.run(
-                'UPDATE University SET {} WHERE shortName = %s'.format(
-                    ', '.join('{} = %s'.format(attr) for attr in update_attributes)
-                ), tuple(data[attr] for attr in update_attributes) + (short_name,)
-            )
-        except KeyError as e:
-            raise BadRequest('Missing attribute: {}'.format(e))
-        return {'status': 'success'}
-
-    def delete(self, short_name):
-        db.run('DELETE FROM University WHERE shortName = %s', (short_name,))
-        return {}
-
-
-@api.route('/professor')
-class Professor(SimpleResource):
-    columns = ('name', 'email', 'universityID')
-    optional = {'email'}
-    table = 'Professor'
-
-
-@api.route('/ta')
-class Ta(SimpleResource):
-    columns = ('name', 'email', 'universityID')
-    table = 'TA'
-
-
-@api.route('/course')
-class Course(SimpleResource):
-    columns = ('shortName', 'name', 'departmentCode',
-               'professorID', 'universityID')
-    table = 'Course'
-
-
-@api.route('/courseRatingAttribute')
-class CourseRatingAttribute(SimpleResource):
-    columns = ('name', 'description')
-    table = 'CourseRatingAttribute'
-
-
-@api.route('/account')
-class Account(Resource):
-    def post(self):
-        data = request.json
-        try:
-            name = data.pop('name', '')
-            email = data.pop('email')
-            password = data.pop('password')
-        except KeyError as e:
-            raise BadRequest('Missing required json attribute: {}'.format(e))
-
-        if data:
-            raise BadRequest('Extra json data: {}'.format(data))
-
-        password_hash = pbkdf2_sha256.hash(password, rounds=1024)
-        account_id = db.run(
-            'INSERT INTO Account (name, email, passwordHash, about) VALUES (%s, %s, %s, %s)',
-            (name, email, password_hash, 'NULL')
+        account_data['id'] = await db.execute(
+            'INSERT INTO Account (name, email, passwordHash, about) VALUES (:name, :email, :passwordHash, :about)',
+            account_data
         )
-        return {
-            'id': account_id,
-            'name': name,
-            'email': email,
-            'about': None
-        }
-
-    def get(self):
-        try:
-            email = request.args['email']
-        except KeyError as e:
-            raise BadRequest('Missing required json attribute: {}'.format(e))
-        columns = ('id', 'name', 'name', 'email', 'about')
-        data = db.fetch_one('SELECT {} FROM Account WHERE email = %s'.format(
-            ', '.join(columns)), email)
-        return dict(zip(data, columns))
+    except IntegrityError:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail='Email already registered')
+    return Account(**account_data)
 
 
-@api.route('/courseRating')
-class CourseRating(Resource):
-    def post(self):
-        data = request.json
-        try:
-            description = data.pop('description', None)
-            account_id = data.pop('accountID')
-            course_id = data.pop('courseID')
-            course_ratings = data.pop('ratings')
-        except KeyError as e:
-            raise BadRequest('Missing required json attribute: {}'.format(e))
+@router.get('/account', response_model=Account)
+async def account_get(account: Account = Depends(auth_account)):
+    return account
 
-        if data:
-            raise BadRequest('Extra json data: {}'.format(data))
 
-        cur_date = datetime.now().strftime('%Y-%m-%d')
+@router.get('/account/{account_id}', response_model=Account)
+async def account_get(account_id: str, account: Account = Depends(auth_account)):
+    if account.id != account_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail='Not authorized for account')
+    return account
 
-        for rating in course_ratings:
-            if not set(rating) == {'attributeID', 'value'} or not (0.0 <= float(rating['value']) <= 1.0):
-                raise BadRequest('Malformed course rating: {}'.format(rating))
 
-        with db as cursor:
-            cursor.execute(
-                'INSERT INTO CourseRating (description, date, accountID, courseID) VALUES (%s, %s, %s, %s)',
-                (description, cur_date, account_id, course_id)
+def encode_account_token(account_id: int) -> str:
+    return jwt.encode({
+        'sub': 'account:{}'.format(account_id),
+        'exp': datetime.utcnow() + timedelta(days=TOKEN_EXPIRATION_DAYS)
+    }, str(SECRET_KEY), algorithm=TOKEN_ALGORITHM)
+
+
+def decode_account_token(token: str) -> Optional[int]:
+    try:
+        payload = jwt.decode(token, str(SECRET_KEY), algorithms=[TOKEN_ALGORITHM])
+    except PyJWTError:
+        return None
+    auth: str = payload.get("sub")
+    if not auth:
+        return None
+    parts = auth.split(':')
+    if len(parts) != 2:
+        return None
+    auth_type, auth_value = parts
+    if auth_type != 'account':
+        return None
+    try:
+        return int(auth_value)
+    except ValueError:
+        return None
+
+
+@router.post('/token', response_model=Token)
+async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    query = 'SELECT id, passwordHash FROM Account WHERE email = :email'
+    data = await db.fetch_one(query, dict(email=form_data.username))
+    if data:
+        account_id, password_hash = data
+        if pwd_context.verify(form_data.password, password_hash):
+            return Token(
+                access_token=encode_account_token(account_id),
+                token_type="bearer"
             )
-            rating_id = cursor.lastrowid
-            cursor.executemany(
-                'INSERT INTO CourseRatingValue (courseRatingID, courseRatingAttributeID, value) VALUES (%s, %s, %s)', [
-                    (rating_id, rating['courseRatingAttributeID'],
-                     float(rating['value']))
-                ])
-        return {
-            'description': description,
-            'accountID': account_id,
-            'courseID': course_id,
-            'ratings': course_ratings
-        }
+    raise HTTPException(status_code=401, detail="Incorrect username or password")
 
-    def get(self):
-        course_id = request.args['course_id']
-        rows = db.fetch_all(
-            'SELECT AVG(value) AS rating, cra.name AS ratingType, cra.id AS ratingTypeID '
-            'FROM CourseRatingValue crv '
-            'JOIN CourseRating cr ON cr.id = crv.courseRatingID '
-            'JOIN CourseRatingAttribute cra ON cra.id = crv.courseRatingAttributeID '
-            'GROUP BY cra.id '
-            'WHERE cr.courseID = %s ',
-            course_id
-        )
-        return [
-            dict(zip(row, ('rating', 'ratingType', 'ratingTypeID')))
-            for row in rows
-        ]
+
+def process_query_filters(args: dict, **where):
+    filters = []
+    for k, v in list(args.items()):
+        if v is None or v == '':
+            del args[k]
+        else:
+            filters.append(where.get(k, '{0} {1} :{0}'.format(
+                k, 'LIKE' if isinstance(v, str) else '='
+            )))
+    return filters
+
+
+async def get_university_id(university_code: str) -> int:
+    query = 'SELECT id FROM University WHERE code = :code'
+    data = await db.fetch_one(query, dict(code=university_code))
+    if not data:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, 'University not found')
+    return data[0]
+
+
+async def ensure_course_exists(code: str, university_id: int):
+    query = 'SELECT code, universityID FROM Course WHERE code = :code AND universityID = :universityID'
+    if not await db.fetch_one(query, dict(code=code, universityID=university_id)):
+        raise HTTPException(status_code=404, detail='Course not found')
+
+
+@router.get('/university', response_model=List[University])
+async def get_universities(name: str = '', id: int = None, website: str = ''):
+    fields = list(University.__fields__)
+    args = dict(id=id, name=name, website=website)
+    filters = process_query_filters(args, name='(name LIKE :name OR shortName LIKE :name)')
+    statements = ['SELECT {} FROM University'.format(', '.join(fields))]
+    if filters:
+        statements += ['WHERE ' + ' AND '.join(filters)]
+    query = ' '.join(statements)
+    return [
+        University(**dict(zip(fields, row)))
+        for row in await db.fetch_all(query, args)
+    ]
+
+
+@router.get('/university/{university_code}', response_model=University)
+async def get_university(university_code: str):
+    fields = list(University.__fields__)
+    query = 'SELECT {} FROM University WHERE code = :code'.format(', '.join(fields))
+    row = await db.fetch_one(query, dict(code=university_code))
+    if not row:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, 'University not found')
+    return University(**dict(zip(fields, row)))
+
+
+@router.post('/university', response_model=University)
+async def create_university(university: UniversityIn, account: Account = Depends(auth_account)):
+    fields = university.__fields__
+    data = university.dict()
+    data['id'] = await db.execute(
+        'INSERT INTO University ({}) VALUES ({})'.format(
+            ', '.join(fields),
+            ', '.join(':' + i for i in fields)
+        ),
+        data
+    )
+    return University(**data)
+
+
+@router.put('/university/{university_code}', response_model=University)
+async def update_university(university: UniversityIn, university_code: str, account: Account = Depends(auth_account)):
+    data = dict(university.dict(), id=await get_university_id(university_code))
+    await db.execute(
+        'UPDATE University SET {} WHERE id = :id'.format(', '.join(
+            '{0} = :{0}'.format(i) for i in university.__fields__
+        )),
+        data
+    )
+    return University(**data)
+
+
+@router.delete('/university/{university_code}', response_model={})
+async def delete_university(university_code: str, account: Account = Depends(auth_account)):
+    deleted = await db.execute(
+        'DELETE FROM University WHERE code = :code',
+        dict(code=university_code)
+    )
+    if deleted != 1:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, 'University not found')
+    return {}
+
+
+@router.get('/university/{university_code}/course', response_model=List[Course])
+async def get_courses(university_code: str, code: str = '', title: str = '', description: str = '', query: str = ''):
+    fields = list(Course.__fields__)
+    args = dict(
+        code=code, title=title, description=description,
+        query='%{}%'.format(query) * bool(query), universityID=await get_university_id(university_code)
+    )
+    filters = process_query_filters(
+        args, query='(code LIKE :query OR title LIKE :query)'
+    )
+    query = 'SELECT {} FROM Course ' \
+            'WHERE {}'.format(', '.join(fields), ' AND '.join(filters))
+    return [
+        Course(**dict(zip(fields, row)))
+        for row in await db.fetch_all(query, args)
+    ]
+
+
+@router.post('/university/{university_code}/course', response_model=Course)
+async def create_course(course: CourseIn, university_code: str, account: Account = Depends(auth_account)):
+    data = dict(course.dict(), universityID=await get_university_id(university_code))
+    m = re.match(r'([A-Za-z]+) *([0-9]+)', data['code'])
+    assert m
+    data['departmentCode'] = dep = m.group(1).upper()
+    data['code'] = dep + m.group(2)
+    await db.execute(
+        'INSERT INTO Course ({}) VALUES ({})'.format(
+            ', '.join(data),
+            ', '.join(':' + i for i in data)
+        ),
+        data
+    )
+    return Course(**data)
+
+
+@router.put('/university/{university_code}/course/{course_code}', response_model=Course)
+async def update_course(course: CourseUpdateIn, university_code: str, course_code: str,
+                        account: Account = Depends(auth_account)):
+    fields = course.__fields__
+    data = dict(course.dict(), universityID=await get_university_id(university_code), code=course_code)
+    await ensure_course_exists(data['code'], data['universityID'])
+    await db.execute(
+        'UPDATE Course SET {} WHERE code = :code AND universityID = :universityID'.format(', '.join(
+            '{0} = :{0}'.format(i) for i in fields
+        )),
+        data
+    )
+    return Course(**data)
+
+
+@router.delete('/university/{university_code}/course/{course_code}', response_model={})
+async def delete_course(university_code: str, course_code: str, account: Account = Depends(auth_account)):
+    data = dict(universityID=await get_university_id(university_code), code=course_code)
+    await ensure_course_exists(data['code'], data['universityID'])
+    await db.execute(
+        'DELETE FROM Course WHERE code = :code AND universityID = :universityID',
+        data
+    )
+    return {}
+
+
+@router.get('/university/{university_code}/course/{course_code}', response_model=Course)
+async def get_course(university_code: str, course_code: str):
+    fields = list(Course.__fields__)
+    args = dict(code=course_code, universityID=await get_university_id(university_code))
+    query = 'SELECT {} FROM Course WHERE universityID = :universityID AND code = :code'.format(', '.join(fields))
+    row = await db.fetch_one(query, args)
+    if not row:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, 'Course not found')
+    return Course(**dict(zip(fields, row)))

@@ -4,7 +4,7 @@ setup(
     name='courator',
     version='0.1.0',
     description='An app to rate and suggest university courses',
-    url='https://github.com/GIT_USER/courator',
+    url='https://github.com/Courator/courator',
     author='Matthew D. Scholefield',
     author_email='matthew331199@gmail.com',
     classifiers=[
@@ -19,11 +19,19 @@ setup(
     keywords='courator',
     packages=['courator'],
     install_requires=[
-        'flask',
-        'flask-restx',
-        'PyMySQL',
-        'flask-database',
-        'passlib'
+        'fastapi',
+        'starlette',
+        'pydantic',
+        'loguru',
+        'databases',
+        'passlib',
+        'python-multipart',
+        'bcrypt',
+        'uvicorn',
+        'aiomysql',
+        'aioredis',
+        'pyjwt',
+        'syncer'
     ],
     entry_points={
         'console_scripts': [

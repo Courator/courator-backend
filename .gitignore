@@ -4,5 +4,6 @@
 /dist/
 .idea/
 .vscode/
+.env
 
 *~
