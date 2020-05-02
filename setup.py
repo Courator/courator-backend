@@ -29,8 +29,8 @@ setup(
         'bcrypt',
         'uvicorn',
         'aiomysql',
-        'aioredis',
         'pyjwt',
+        'requests',
         'syncer'
     ],
     entry_points={

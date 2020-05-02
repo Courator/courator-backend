@@ -18,14 +18,3 @@ setup_logging(
     logging.DEBUG if DEBUG else logging.INFO
 )
 
-
-# import aioredis
-# from aioredis import Redis
-# REDIS_HOST: str = config("REDIS_HOST")
-# REDIS_PORT: int = config("REDIS_PORT", cast=int)
-# async def get_redis() -> Redis:
-#     pool = await aioredis.create_redis_pool((REDIS_HOST, REDIS_PORT), encoding='utf-8')
-#     try:
-#         yield pool
-#     finally:
-#         pool.close()
