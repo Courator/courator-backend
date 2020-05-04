@@ -14,13 +14,14 @@ def main():
     sp.required = True
     sp.add_parser('init')
     sp.add_parser('delete')
-    sp.add_parser('run')
+    p = sp.add_parser('run')
+    p.add_argument('-p', '--port', help='Port to run on. Default: 8001', type=int, default=8001)
     p = sp.add_parser('load')
     p.add_argument('data_json', help='JSON file with list of {"CourseNumber": "CS100", "CourseName": "", "CourseDescription": ""}')
+    p.add_argument('university', help='University code to upload to')
     p.add_argument('auth', help='Authentication in form of username:password')
     p.add_argument('-e', '--existing-only', help="Don't create an account/university if they don't exist")
-    p.add_argument('-s', '--server-url', help='URL of server to upload to', default='http://localhost:5000')
-    p.add_argument('-u', '--university', help='University code to upload to', default='UIUC')
+    p.add_argument('-s', '--server-url', help='URL of server to upload to', default='http://localhost:8001')
     args = parser.parse_args()
     if args.action == 'init':
         init_db()
@@ -68,7 +69,7 @@ def main():
         if DEBUG:
             log_level = 'debug'
             reload = True
-        uvicorn.run("courator:app", host="0.0.0.0", port=5000, log_level=log_level, reload=reload)
+        uvicorn.run("courator:app", host="0.0.0.0", port=args.port, log_level=log_level, reload=reload)
 
 
 if __name__ == '__main__':
