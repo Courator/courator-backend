@@ -69,3 +69,9 @@ class CourseUpdateIn(CourseBase):
 class Course(CourseBase):
     code: str
     universityID: int
+
+
+class CourseMetadata(BaseModel):
+    iconUrl: str = ''
+    websiteUrl: str = ''
+    catalogUrl: str = ''

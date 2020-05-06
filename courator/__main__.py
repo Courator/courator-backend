@@ -1,7 +1,7 @@
 import json
 from argparse import ArgumentParser
 
-import requests
+import httpx
 import uvicorn
 
 from courator import DEBUG
@@ -32,36 +32,36 @@ def main():
             courses = json.load(f)
         username, password = args.auth.split(':')
         base = args.server_url.rstrip('/')
-        login = lambda: requests.post(base + '/token', data=dict(username=username, password=password, client_id='cli', grant_type='password', scope='account'))
+        login = lambda: httpx.post(base + '/token', data=dict(username=username, password=password, client_id='cli', grant_type='password', scope='account'))
         r = login()
-        if not r.ok:
+        if r.is_error:
             r2 = None
             if not args.existing_only:
                 print('Creating account...')
-                r2 = requests.post(base + '/account', json=dict(email=username, password=password))
-            if not r2 or not r2.ok:
+                r2 = httpx.post(base + '/account', json=dict(email=username, password=password))
+            if not r2 or r2.is_error:
                 print('Failed to authenticate {}: {}'.format(r.status_code, r.content))
                 raise SystemExit(1)
             r = login()
-            assert r.ok
+            assert not r2.is_error
         token = r.json()['access_token']
         auth_headers = {'Authorization': 'Bearer {}'.format(token)}
-        r = requests.get(base + '/university/' + args.university)
-        if not r.ok:
+        r = httpx.get(base + '/university/' + args.university)
+        if r.is_error:
             if args.existing_only:
                 print('University does not exist')
                 raise SystemExit(1)
             print('Creating university...')
-            r = requests.post(base + '/university', json=dict(name=args.university, code=args.university), headers=auth_headers)
-            assert r.ok
+            r = httpx.post(base + '/university', json=dict(name=args.university, code=args.university), headers=auth_headers)
+            assert not r.is_error
 
         for course in courses:
             code = course['CourseNumber']
             title = course['CourseName']
             description = course['CourseDescription']
             print('Uploading {}...'.format(code))
-            r = requests.post(base + '/university/{}/course'.format(args.university), json=dict(code=code, title=title, description=description), headers=auth_headers)
-            if not r.ok:
+            r = httpx.post(base + '/university/{}/course'.format(args.university), json=dict(code=code, title=title, description=description), headers=auth_headers)
+            if r.is_error:
                 print('Failed to upload ({}): {}'.format(r.status_code, r.content))
     elif args.action == 'run':
         log_level = 'info'

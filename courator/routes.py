@@ -1,21 +1,27 @@
+import asyncio
+import base64
 import re
+from asyncio import ensure_future
 from datetime import datetime, timedelta
+from functools import lru_cache
 from typing import Optional, List
+from urllib.parse import urljoin
 
+import httpx
 import jwt
+from bs4 import BeautifulSoup
 from fastapi import APIRouter, HTTPException
 from fastapi import status
 from fastapi.params import Depends
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jwt import PyJWTError
-from loguru import logger
 from passlib.context import CryptContext
 from pymysql import IntegrityError
 
 from courator import db
 from courator.config import TOKEN_EXPIRATION_DAYS, SECRET_KEY, TOKEN_ALGORITHM
 from courator.schemas import AccountIn, Account, University, UniversityIn, PERM_ADMIN, Course, CourseIn, CourseUpdateIn, \
-    Token
+    Token, CourseMetadata
 
 router = APIRouter()
 
@@ -221,13 +227,22 @@ async def get_courses(university_code: str, code: str = '', title: str = '', des
     ]
 
 
+def parse_course_code(course_code):
+    m = re.match(r'([A-Za-z]+) *([0-9]+)', course_code)
+    assert m
+    return m.group(1).upper(), m.group(2)
+
+
+def format_course_code(course_code):
+    return '{} {}'.format(*parse_course_code(course_code))
+
+
 @router.post('/university/{university_code}/course', response_model=Course)
 async def create_course(course: CourseIn, university_code: str, account: Account = Depends(auth_account)):
     data = dict(course.dict(), universityID=await get_university_id(university_code))
-    m = re.match(r'([A-Za-z]+) *([0-9]+)', data['code'])
-    assert m
-    data['departmentCode'] = dep = m.group(1).upper()
-    data['code'] = dep + m.group(2)
+    dep, num = parse_course_code(data['code'])
+    data['departmentCode'] = dep
+    data['code'] = dep + num
     await db.execute(
         'INSERT INTO Course ({}) VALUES ({})'.format(
             ', '.join(data),
@@ -273,3 +288,75 @@ async def get_course(university_code: str, course_code: str):
     if not row:
         raise HTTPException(status.HTTP_404_NOT_FOUND, 'Course not found')
     return Course(**dict(zip(fields, row)))
+
+
+async def guess_url(query, client: httpx.AsyncClient):
+    r = await client.get('https://www.google.com/search?btnI=&q=', params={'btnI': '', 'q': query},
+                         allow_redirects=False)
+    if r.is_redirect and 'location' in r.headers:
+        website = r.headers['location']
+        prefix = 'https://www.google.com/url?q='
+        if website.startswith(prefix):
+            website = website[len(prefix):]
+        return website
+    return ''
+
+
+def generate_data_url(r):
+    content_type = r.headers["content-type"]
+    data_string = base64.b64encode(r.content).decode()
+    data_url = "data:{};base64,{}".format(content_type, data_string)
+    return data_url
+
+
+def guc_icon_favicon_request_args(url: str) -> dict:
+    return dict(url='https://s2.googleusercontent.com/s2/favicons', params={'domain_url': url})
+
+
+@lru_cache(1)
+def guc_get_generic_icon_data() -> str:
+    return generate_data_url(httpx.get(**guc_icon_favicon_request_args('.')))
+
+
+async def get_favicon_data(website, client) -> str:
+    website_cor = client.get(website)
+    guc_cor = asyncio.ensure_future(client.get(**guc_icon_favicon_request_args(website)))
+    bs = BeautifulSoup((await website_cor).text, 'html.parser')
+    link = bs.find("link", rel=lambda x: 'icon' in x.split())
+    if link:
+        guc_cor.cancel()
+        return generate_data_url(await client.get(urljoin(website, link['href'])))
+    guc_icon_url = generate_data_url(await guc_cor)
+    if guc_icon_url != guc_get_generic_icon_data():
+        return guc_icon_url
+    return ''
+
+
+async def replace_error(coroutine, error_type, value):
+    try:
+        return await coroutine
+    except error_type:
+        return value
+
+
+@router.get('/university/{university_code}/course/{course_code}/metadata', response_model=CourseMetadata)
+async def get_course_metadata(university_code: str, course_code: str):
+    course_cor = ensure_future(db.fetch_one(
+        'SELECT 1 FROM Course c JOIN University u ON c.universityID = u.id WHERE u.code = :ucode AND c.code = :ccode',
+        dict(ucode=university_code, ccode=course_code)))
+    metadata = CourseMetadata()
+    async with httpx.AsyncClient() as client:
+        code = format_course_code(course_code)
+        website_cor = ensure_future(guess_url('{} {}'.format(code, university_code), client))
+        info_cor = ensure_future(guess_url('{} course catalog {}'.format(code, university_code), client))
+        metadata.websiteUrl = website = await replace_error(website_cor, httpx.HTTPError, '')
+        if website:
+            metadata.iconUrl = await replace_error(get_favicon_data(website, client), httpx.HTTPError, '')
+        metadata.catalogUrl = await replace_error(info_cor, httpx.HTTPError, '')
+        if metadata.catalogUrl == metadata.iconUrl:
+            metadata.iconUrl = ''
+
+    if not await course_cor:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, 'No such course/university')
+
+    return metadata

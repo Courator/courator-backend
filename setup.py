@@ -30,8 +30,10 @@ setup(
         'uvicorn',
         'aiomysql',
         'pyjwt',
-        'requests',
-        'syncer'
+        'httpx',
+        'syncer',
+        'beautifulsoup4',
+        'async_lru'
     ],
     entry_points={
         'console_scripts': [
