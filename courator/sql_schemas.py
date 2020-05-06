@@ -56,7 +56,8 @@ schemas = [
         description VARCHAR(2000) NOT NULL,
         date DATE NOT NULL,
         accountID INTEGER NOT NULL REFERENCES Account,
-        courseID INTEGER NOT NULL REFERENCES Course
+        universityID INTEGER NOT NULL REFERENCES University,
+        courseCode VARCHAR(16) NOT NULL
     )''', 'CourseRating', Obj.table),
     ('''CREATE TABLE CourseRatingAttribute(
         id INTEGER NOT NULL AUTO_INCREMENT PRIMARY KEY,

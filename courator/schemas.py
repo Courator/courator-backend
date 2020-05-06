@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, List
 
 from fastapi.params import Query
 from pydantic import BaseModel
@@ -75,3 +75,26 @@ class CourseMetadata(BaseModel):
     iconUrl: str = ''
     websiteUrl: str = ''
     catalogUrl: str = ''
+
+
+class RatingAttribute(BaseModel):
+    name: str
+    description: str
+
+
+class RatingAttributeIn(RatingAttribute):
+    name: str
+    description: str
+    id: str
+
+
+class SingleCourseRatingIn(BaseModel):
+    id: str
+    value: int
+
+
+class CourseRatingIn(BaseModel):
+    ratings: List[SingleCourseRatingIn]
+    overallRating: int
+    description: str
+    newRatingAttributes: List[RatingAttributeIn] = []

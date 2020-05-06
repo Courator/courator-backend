@@ -7,7 +7,6 @@ from functools import lru_cache
 from typing import Optional, List
 from urllib.parse import urljoin
 
-import async_lru
 import httpx
 import jwt
 from async_lru import alru_cache
@@ -19,12 +18,13 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jwt import PyJWTError
 from loguru import logger
 from passlib.context import CryptContext
+from pydantic import BaseModel
 from pymysql import IntegrityError
 
 from courator import db
 from courator.config import TOKEN_EXPIRATION_DAYS, SECRET_KEY, TOKEN_ALGORITHM
 from courator.schemas import AccountIn, Account, University, UniversityIn, PERM_ADMIN, Course, CourseIn, CourseUpdateIn, \
-    Token, CourseMetadata
+    Token, CourseMetadata, CourseRatingIn, SingleCourseRatingIn
 
 router = APIRouter()
 
@@ -282,7 +282,6 @@ async def delete_course(university_code: str, course_code: str, account: Account
     return {}
 
 
-@router.get('/university/{university_code}/course/{course_code}', response_model=Course)
 async def get_course(university_code: str, course_code: str):
     fields = list(Course.__fields__)
     args = dict(code=course_code, universityID=await get_university_id(university_code))
@@ -291,6 +290,11 @@ async def get_course(university_code: str, course_code: str):
     if not row:
         raise HTTPException(status.HTTP_404_NOT_FOUND, 'Course not found')
     return Course(**dict(zip(fields, row)))
+
+
+@router.get('/university/{university_code}/course/{course_code}', response_model=Course)
+async def get_course_route(university_code: str, course_code: str):
+    return await get_course(university_code, course_code)
 
 
 async def guess_url(query, client: httpx.AsyncClient):
@@ -354,7 +358,8 @@ async def get_course_metadata(university_code: str, course_code: str):
         code = format_course_code(course_code)
         website_cors = [
             ensure_future(guess_url(fmt.format(univ=university_code, course=code), client))
-            for fmt in ['{univ} {course} home page', '{univ} {course} page', '{univ} {course} homepage', '{univ} {course} website']
+            for fmt in
+            ['{univ} {course} home page', '{univ} {course} page', '{univ} {course} homepage', '{univ} {course} website']
         ]
         info_cor = ensure_future(guess_url('{} course description {}'.format(code, university_code), client))
 
@@ -373,3 +378,59 @@ async def get_course_metadata(university_code: str, course_code: str):
         raise HTTPException(status.HTTP_404_NOT_FOUND, 'No such course/university')
 
     return metadata
+
+
+@router.post('/university/{university_code}/course/{course_code}/rating', response_model={})
+async def submit_rating(university_code: str, course_code: str, course_rating: CourseRatingIn,
+                        account: Account = Depends(auth_account)):
+    id_to_dbid = {}
+    for new_attr in course_rating.newRatingAttributes:
+        new_id = await db.execute(
+            'INSERT INTO CourseRatingAttribute(name, description) VALUES (:name, :description)',
+            dict(name=new_attr.name, description=new_attr.description)
+        )
+        id_to_dbid[new_attr.id] = new_id
+    r = await db.fetch_one('SELECT id FROM CourseRatingAttribute WHERE name = :name', dict(name='.overall'))
+    if not r:
+        overall_id = await db.execute(
+            'INSERT INTO CourseRatingAttribute(name, description) VALUES (:name, :description)',
+            dict(name='.overall', description='Overall course rating')
+        )
+    else:
+        overall_id = r[0]
+    date_str = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+    course = await get_course(university_code, course_code)
+    rating_id = await db.execute(
+        'INSERT INTO CourseRating(description, date, accountID, courseCode, universityID) VALUES '
+        '(:description, :date, :accountID, :courseCode, :universityID)',
+        dict(
+            description=course_rating.description, date=date_str, accountID=account.id, courseCode=course.code,
+            universityID=course.universityID
+        )
+    )
+    for rating in course_rating.ratings + [SingleCourseRatingIn(id=str(overall_id), value=course_rating.overallRating)]:
+        real_id = id_to_dbid.get(rating.id)
+        if not real_id:
+            real_id = int(rating.id)
+        db.execute(
+            'INSERT INTO CourseRatingValue(courseRatingID, courseRatingAttributeID, value) VALUES '
+            '(:ratingID, :attributeID, :value)',
+            dict(
+                ratingID=rating_id, attributeID=real_id, value=rating.value / 5.0
+            )
+        )
+
+    return {}
+
+
+@router.get('/university/{university_code}/course/{course_code}/rating', response_model=List[str])
+async def get_ratings(university_code: str, course_code: str):
+    course = await get_course(university_code, course_code)
+    descriptions = await db.fetch_all(
+        'SELECT description FROM CourseRating cr WHERE cr.courseCode = :courseCode AND cr.universityID = :universityID',
+        dict(courseCode=course.code, universityID=course.universityID)
+    )
+    return [
+        i[0]
+        for i in descriptions
+    ]
