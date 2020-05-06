@@ -7,14 +7,17 @@ from functools import lru_cache
 from typing import Optional, List
 from urllib.parse import urljoin
 
+import async_lru
 import httpx
 import jwt
+from async_lru import alru_cache
 from bs4 import BeautifulSoup
 from fastapi import APIRouter, HTTPException
 from fastapi import status
 from fastapi.params import Depends
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jwt import PyJWTError
+from loguru import logger
 from passlib.context import CryptContext
 from pymysql import IntegrityError
 
@@ -335,11 +338,13 @@ async def get_favicon_data(website, client) -> str:
 async def replace_error(coroutine, error_type, value):
     try:
         return await coroutine
-    except error_type:
+    except error_type as e:
+        logger.debug('Error running coroutine: {}', e)
         return value
 
 
 @router.get('/university/{university_code}/course/{course_code}/metadata', response_model=CourseMetadata)
+@alru_cache(maxsize=30)
 async def get_course_metadata(university_code: str, course_code: str):
     course_cor = ensure_future(db.fetch_one(
         'SELECT 1 FROM Course c JOIN University u ON c.universityID = u.id WHERE u.code = :ucode AND c.code = :ccode',
@@ -347,14 +352,22 @@ async def get_course_metadata(university_code: str, course_code: str):
     metadata = CourseMetadata()
     async with httpx.AsyncClient() as client:
         code = format_course_code(course_code)
-        website_cor = ensure_future(guess_url('{} {}'.format(code, university_code), client))
-        info_cor = ensure_future(guess_url('{} course catalog {}'.format(code, university_code), client))
-        metadata.websiteUrl = website = await replace_error(website_cor, httpx.HTTPError, '')
-        if website:
-            metadata.iconUrl = await replace_error(get_favicon_data(website, client), httpx.HTTPError, '')
+        website_cors = [
+            ensure_future(guess_url(fmt.format(univ=university_code, course=code), client))
+            for fmt in ['{univ} {course} home page', '{univ} {course} page', '{univ} {course} homepage', '{univ} {course} website']
+        ]
+        info_cor = ensure_future(guess_url('{} course description {}'.format(code, university_code), client))
+
         metadata.catalogUrl = await replace_error(info_cor, httpx.HTTPError, '')
-        if metadata.catalogUrl == metadata.iconUrl:
-            metadata.iconUrl = ''
+
+        for website_cor in website_cors:
+            website = await replace_error(website_cor, httpx.HTTPError, '')
+            if website and website != metadata.catalogUrl:
+                metadata.websiteUrl = website
+                break
+
+        if metadata.websiteUrl:
+            metadata.iconUrl = await replace_error(get_favicon_data(website, client), httpx.HTTPError, '')
 
     if not await course_cor:
         raise HTTPException(status.HTTP_404_NOT_FOUND, 'No such course/university')
