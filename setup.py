@@ -24,6 +24,7 @@ setup(
         'pydantic',
         'loguru',
         'databases',
+        'pymysql',
         'passlib',
         'python-multipart',
         'bcrypt',

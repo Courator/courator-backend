@@ -18,9 +18,10 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jwt import PyJWTError
 from loguru import logger
 from passlib.context import CryptContext
+from pydantic import BaseModel
 from pymysql import IntegrityError
 
-from courator import db
+from courator import db, DATABASE_URL
 from courator.config import TOKEN_EXPIRATION_DAYS, SECRET_KEY, TOKEN_ALGORITHM
 from courator.schemas import AccountIn, Account, University, UniversityIn, PERM_ADMIN, Course, CourseIn, CourseUpdateIn, \
     Token, CourseMetadata, CourseRatingIn, SingleCourseRatingIn, CourseRatingAttribute, CourseRatingAttributeInfo, \
@@ -77,6 +78,18 @@ async def account_get(account: Account = Depends(auth_account)):
 
 
 @router.get('/account/{account_id}', response_model=Account)
+async def account_get(account_id: str, account: Account = Depends(auth_account)):
+    if account.id != account_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail='Not authorized for account')
+    return account
+
+
+class Suggestion(BaseModel):
+    courseCode: str
+    universityCode: str
+
+
+@router.get('/account/{account_id}/suggestions', response_model=List[Suggestion])
 async def account_get(account_id: str, account: Account = Depends(auth_account)):
     if account.id != account_id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail='Not authorized for account')
@@ -487,6 +500,30 @@ async def get_rating_attributes(count: Optional[int] = None):
     return [
         CourseRatingAttributeInfo(id=attribute_id, name=name, description=description, usageCount=usage_count)
         for usage_count, attribute_id, name, description in rows
+    ]
+
+
+class Correlation(BaseModel):
+    attrID: int
+    correlation: float
+
+
+@router.get('/ratingCorrelation', response_model=List[Correlation])
+async def get_rating_correlation(account: Account = Depends(auth_account)):
+    import pymysql
+    c = pymysql.connect(
+        host=DATABASE_URL.hostname,
+        user=DATABASE_URL.username,
+        password=DATABASE_URL.password,
+        database=DATABASE_URL.database
+    )
+    cur = c.cursor()
+    cur.execute('CALL compute_correlation(%s)', account.id)
+    rows = cur.fetchall()
+    cur.close()
+    return [
+        Correlation(attrID=attr_id, correlation=correlation)
+        for attr_id, correlation in rows
     ]
 
 

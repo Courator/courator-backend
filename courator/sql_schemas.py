@@ -8,6 +8,7 @@ from . import db
 class Obj(Enum):
     table = 1
     index = 2
+    function = 3
 
 
 schemas = [
@@ -118,7 +119,69 @@ schemas = [
         taID INTEGER NOT NULL REFERENCES TA,
         courseID INTEGER NOT NULL REFERENCES Course,
         PRIMARY KEY(taID, courseID)
-    )''', 'TACourse', Obj.table)
+    )''', 'TACourse', Obj.table),
+    ('''DROP PROCEDURE IF EXISTS compute_correlation;
+DELIMITER ;;
+CREATE PROCEDURE compute_correlation(input_account_id INTEGER)
+BEGIN
+    WITH RValues AS (
+        SELECT crv.courseRatingAttributeID AS attrID, crv.value AS value, cr.id AS rID
+        FROM CourseRating cr
+        JOIN CourseRatingValue crv ON crv.courseRatingID = cr.id
+        WHERE cr.accountID = input_account_id
+    ),
+    Averages AS (
+        SELECT attrID, AVG(value) AS meanValue
+        FROM RValues
+        GROUP BY attrID
+    ),
+    Centered AS (
+        SELECT v.attrID AS attrID, (value - av.meanValue) AS centeredValue, rID
+        FROM RValues v
+        JOIN Averages av ON av.attrID = v.attrID
+    ),
+    Variances AS (
+        SELECT attrID, AVG(centeredValue * centeredValue) AS varValue
+        FROM Centered
+        GROUP BY attrID
+    ),
+    Normalized AS (
+        SELECT c.attrID AS attrID, centeredValue / SQRT(varValue) AS normValue, rID
+        FROM Centered c
+        JOIN Variances var ON var.attrID = c.attrID
+    ),
+    OverallValues AS (
+        SELECT r.attrID AS attrID, r.rID AS rID, r.value AS overallValue
+        FROM RValues r
+        JOIN CourseRatingAttribute cra ON cra.id = r.attrID
+        WHERE cra.name = '_Overall'
+    ),
+    OverallMean AS (SELECT AVG(overallValue) FROM OverallValues),
+    OverallCentered AS (
+        SELECT v.attrID AS attrID, (overallValue - (SELECT * FROM OverallMean)) AS overallCenteredValue, rID
+        FROM OverallValues v
+    ),
+    OverallVariance AS (
+        SELECT AVG(overallCenteredValue * overallCenteredValue) AS overallVarianceValue
+        FROM OverallCentered
+    ),
+    OverallNorm AS (
+        SELECT c.attrID AS attrID, overallCenteredValue / SQRT(var.overallVarianceValue) AS overallNormValue, rID
+        FROM OverallCentered c
+        JOIN OverallVariance var ON TRUE
+    ),
+    Correlation AS (
+        SELECT n.attrID AS attrID, AVG(normValue * o.overallNormValue) AS corr
+        FROM Normalized n
+        JOIN OverallNorm o ON o.rID = n.rID
+        GROUP BY attrID
+    )
+    SELECT attrID, corr
+    FROM Correlation c
+    JOIN CourseRatingAttribute cra ON cra.id = c.attrID
+    WHERE cra.name != '_Overall';
+END;;
+DELIMITER ;''', 'compute_suggestions', Obj.function)
 ]
 
 
