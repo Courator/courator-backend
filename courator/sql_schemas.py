@@ -54,7 +54,7 @@ schemas = [
     ('''CREATE TABLE CourseRating(
         id INTEGER NOT NULL AUTO_INCREMENT PRIMARY KEY,
         description VARCHAR(2000) NOT NULL,
-        date DATE NOT NULL,
+        date DATETIME NOT NULL,
         accountID INTEGER NOT NULL REFERENCES Account,
         universityID INTEGER NOT NULL REFERENCES University,
         courseCode VARCHAR(16) NOT NULL

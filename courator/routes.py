@@ -18,13 +18,13 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jwt import PyJWTError
 from loguru import logger
 from passlib.context import CryptContext
-from pydantic import BaseModel
 from pymysql import IntegrityError
 
 from courator import db
 from courator.config import TOKEN_EXPIRATION_DAYS, SECRET_KEY, TOKEN_ALGORITHM
 from courator.schemas import AccountIn, Account, University, UniversityIn, PERM_ADMIN, Course, CourseIn, CourseUpdateIn, \
-    Token, CourseMetadata, CourseRatingIn, SingleCourseRatingIn
+    Token, CourseMetadata, CourseRatingIn, SingleCourseRatingIn, CourseRatingAttribute, CourseRatingAttributeInfo, \
+    RatingAttribute, CourseRatingInfo, RatingAttributeValueInfo, CourseReview, PublicAccount, SingleRatingInfo
 
 router = APIRouter()
 
@@ -384,13 +384,16 @@ async def get_course_metadata(university_code: str, course_code: str):
 async def submit_rating(university_code: str, course_code: str, course_rating: CourseRatingIn,
                         account: Account = Depends(auth_account)):
     id_to_dbid = {}
+    course = await get_course(university_code, course_code)
+    if await db.fetch_one('SELECT * FROM CourseRating WHERE accountID = :accountID AND courseCode = :courseCode AND universityID = :universityID', dict(accountID=account.id, courseCode=course_code, universityID=course.universityID)):
+        raise HTTPException(status.HTTP_409_CONFLICT, 'Already rated class')
     for new_attr in course_rating.newRatingAttributes:
         new_id = await db.execute(
             'INSERT INTO CourseRatingAttribute(name, description) VALUES (:name, :description)',
             dict(name=new_attr.name, description=new_attr.description)
         )
         id_to_dbid[new_attr.id] = new_id
-    r = await db.fetch_one('SELECT id FROM CourseRatingAttribute WHERE name = :name', dict(name='.overall'))
+    r = await db.fetch_one('SELECT id FROM CourseRatingAttribute WHERE name = :name', dict(name='_Overall'))
     if not r:
         overall_id = await db.execute(
             'INSERT INTO CourseRatingAttribute(name, description) VALUES (:name, :description)',
@@ -399,7 +402,6 @@ async def submit_rating(university_code: str, course_code: str, course_rating: C
     else:
         overall_id = r[0]
     date_str = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
-    course = await get_course(university_code, course_code)
     rating_id = await db.execute(
         'INSERT INTO CourseRating(description, date, accountID, courseCode, universityID) VALUES '
         '(:description, :date, :accountID, :courseCode, :universityID)',
@@ -408,29 +410,89 @@ async def submit_rating(university_code: str, course_code: str, course_rating: C
             universityID=course.universityID
         )
     )
-    for rating in course_rating.ratings + [SingleCourseRatingIn(id=str(overall_id), value=course_rating.overallRating)]:
-        real_id = id_to_dbid.get(rating.id)
-        if not real_id:
-            real_id = int(rating.id)
-        db.execute(
-            'INSERT INTO CourseRatingValue(courseRatingID, courseRatingAttributeID, value) VALUES '
-            '(:ratingID, :attributeID, :value)',
-            dict(
-                ratingID=rating_id, attributeID=real_id, value=rating.value / 5.0
+    try:
+        for rating in course_rating.ratings + [
+            SingleCourseRatingIn(id=str(overall_id), value=course_rating.overallRating)
+        ]:
+            real_id = id_to_dbid.get(rating.id)
+            if not real_id:
+                real_id = int(rating.id)
+            await db.execute(
+                'INSERT INTO CourseRatingValue(courseRatingID, courseRatingAttributeID, value) VALUES '
+                '(:ratingID, :attributeID, :value)',
+                dict(
+                    ratingID=rating_id, attributeID=real_id, value=rating.value / 5.0
+                )
             )
-        )
+    except (ValueError, IntegrityError):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail='Invalid rating id')
 
     return {}
 
 
-@router.get('/university/{university_code}/course/{course_code}/rating', response_model=List[str])
+@router.get('/university/{university_code}/course/{course_code}/rating', response_model=CourseRatingInfo)
 async def get_ratings(university_code: str, course_code: str):
     course = await get_course(university_code, course_code)
-    descriptions = await db.fetch_all(
-        'SELECT description FROM CourseRating cr WHERE cr.courseCode = :courseCode AND cr.universityID = :universityID',
+    attribute_ratings = await db.fetch_all(
+        'SELECT attributeID, attributeCount, avgRating '
+        'FROM (' + (
+            'SELECT crv.courseRatingAttributeID AS attributeID, COUNT(crv.value) AS attributeCount, AVG(crv.value) AS avgRating '
+            'FROM CourseRatingValue crv '
+            'INNER JOIN CourseRating cr ON cr.id = crv.courseRatingID '
+            'WHERE cr.courseCode = :courseCode AND cr.universityID = :universityID '
+            'GROUP BY crv.courseRatingAttributeID'
+        ) + ') s ' +
+        'ORDER BY attributeCount',
         dict(courseCode=course.code, universityID=course.universityID)
     )
+    reviews = await db.fetch_all(
+        'SELECT a.name AS accountName, a.email AS accountEmail, a.about AS accountAbout, '
+        '   a.id AS accountID, cr.description AS description, cr.date AS date, '
+        '   GROUP_CONCAT(crv.value SEPARATOR \',\') AS ratings, '
+        '    GROUP_CONCAT(cra.id SEPARATOR \',\') AS ratingIDs '
+        'FROM CourseRating cr '
+        'INNER JOIN Account a ON a.id = cr.accountID '
+        'INNER JOIN CourseRatingValue crv ON crv.courseRatingID = cr.id '
+        'INNER JOIN CourseRatingAttribute cra ON cra.id = crv.courseRatingAttributeID '
+        'WHERE cr.courseCode = :courseCode AND cr.universityID = :universityID '
+        'ORDER BY cr.date',
+        dict(courseCode=course_code, universityID=course.universityID)
+    )
+    print('REVIEW:', reviews)
+    return CourseRatingInfo(
+        attributes=[
+            RatingAttributeValueInfo(attributeID=attribute_id, average=avg_rating, count=attribute_count)
+            for attribute_id, attribute_count, avg_rating in attribute_ratings
+        ],
+        reviews=[
+            CourseReview(account=PublicAccount(name=accountName, id=accountID, email=accountEmail, about=accountAbout), description=description, date=date.timestamp(), ratings=[
+                SingleRatingInfo(value=float(val), attributeID=int(ratingID))
+                for val, ratingID in zip(ratings.split(','), ratingIDs.split(','))
+            ])
+            for accountName, accountEmail, accountAbout, accountID, description, date, ratings, ratingIDs in reviews
+            if accountName is not None
+        ]
+    )
+
+
+@router.get('/ratingAttribute', response_model=List[CourseRatingAttribute])
+async def get_rating_attributes(count: Optional[int] = None):
+    rows = await db.fetch_all('SELECT SUM(1) AS attributeCount, cra.id, name, description '
+                              'FROM CourseRatingValue crv '
+                              'RIGHT JOIN CourseRatingAttribute cra ON cra.id = crv.courseRatingAttributeID '
+                              'GROUP BY cra.id ORDER BY attributeCount DESC' + (
+                                  ' LIMIT :count' if count is not None else ''),
+                              dict(count=count) if count is not None else {})
     return [
-        i[0]
-        for i in descriptions
+        CourseRatingAttributeInfo(id=attribute_id, name=name, description=description, usageCount=usage_count)
+        for usage_count, attribute_id, name, description in rows
     ]
+
+
+@router.post('/ratingAttribute', response_model=CourseRatingAttribute)
+async def post_rating_attribute(rating_attribute: RatingAttribute, account: Account = Depends(auth_account)):
+    rating_attribute_id = await db.execute(
+        'INSERT INTO CourseRatingAttribute(name, description) VALUES (:name, :description)',
+        dict(name=rating_attribute.name, description=rating_attribute.description)
+    )
+    return CourseRatingAttribute(id=rating_attribute_id, **rating_attribute.dict())

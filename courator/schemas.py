@@ -48,6 +48,10 @@ class Account(AccountBase):
     permissions: int = 0b01
 
 
+class PublicAccount(AccountBase):
+    id: int
+
+
 ###############
 # Course
 
@@ -82,9 +86,17 @@ class RatingAttribute(BaseModel):
     description: str
 
 
-class RatingAttributeIn(RatingAttribute):
+class CourseRatingAttribute(BaseModel):
+    id: int
     name: str
     description: str
+
+
+class CourseRatingAttributeInfo(CourseRatingAttribute):
+    usageCount: int
+
+
+class RatingAttributeIn(RatingAttribute):
     id: str
 
 
@@ -98,3 +110,26 @@ class CourseRatingIn(BaseModel):
     overallRating: int
     description: str
     newRatingAttributes: List[RatingAttributeIn] = []
+
+
+class RatingAttributeValueInfo(BaseModel):
+    attributeID: int
+    average: float
+    count: int
+
+
+class SingleRatingInfo(BaseModel):
+    attributeID: int
+    value: float
+
+
+class CourseReview(BaseModel):
+    account: PublicAccount
+    description: str = ''
+    date: int
+    ratings: List[SingleRatingInfo]
+
+
+class CourseRatingInfo(BaseModel):
+    attributes: List[RatingAttributeValueInfo]
+    reviews: List[CourseReview]
