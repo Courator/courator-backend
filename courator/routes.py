@@ -455,6 +455,7 @@ async def get_ratings(university_code: str, course_code: str):
         'INNER JOIN CourseRatingValue crv ON crv.courseRatingID = cr.id '
         'INNER JOIN CourseRatingAttribute cra ON cra.id = crv.courseRatingAttributeID '
         'WHERE cr.courseCode = :courseCode AND cr.universityID = :universityID '
+        'GROUP BY cr.id '
         'ORDER BY cr.date',
         dict(courseCode=course_code, universityID=course.universityID)
     )
