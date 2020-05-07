@@ -472,7 +472,6 @@ async def get_ratings(university_code: str, course_code: str):
         'ORDER BY cr.date',
         dict(courseCode=course_code, universityID=course.universityID)
     )
-    print('REVIEW:', reviews)
     return CourseRatingInfo(
         attributes=[
             RatingAttributeValueInfo(attributeID=attribute_id, average=avg_rating, count=attribute_count)
