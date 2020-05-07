@@ -523,6 +523,7 @@ async def get_rating_correlation(account: Account = Depends(auth_account)):
     return [
         Correlation(attrID=attr_id, correlation=correlation)
         for attr_id, correlation in rows
+        if correlation is not None
     ]
 
 
